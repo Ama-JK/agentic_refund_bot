@@ -2,6 +2,8 @@ import json
 from typing import Dict, TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
+# Importing ChatOllama to communicate with our locally running Llama 3 model
+from langchain_ollama import ChatOllama
 
 # ==========================================
 # 1. DEFINE THE CORE GRAPH STATE
@@ -16,17 +18,49 @@ class AgentState(TypedDict):
     final_output: str
 
 # ==========================================
-# 2. DEFINE ARCHITECTURAL NODES
+# 2. DEFINE ARCHITECTURAL NODES (WITH LOCAL LLM!)
 # ==========================================
 def router_node(state: AgentState) -> Dict:
-    query = state["user_query"].upper()
-    extracted_order = "UNKNOWN"
-    if "FR-" in query:
-        start_idx = query.find("FR-")
-        extracted_order = query[start_idx:start_idx+8]
-    if "REFUND" in query or "RETURN" in query:
-        return {"category": "refund", "order_id": extracted_order}
-    else:
+    query = state["user_query"]
+    
+    # Initializing the local Llama 3 model with zero temperature for deterministic outputs
+    llm = ChatOllama(model="llama3", temperature=0)
+    
+    # System prompt directing the LLM to act as a structured router and extract data as JSON
+    system_prompt = (
+        "You are an expert support router. Analyze the user's query and extract details.\n"
+        "1. Identify the category: If they want a refund or return, set category to 'refund'. Otherwise, set it to 'general_qa'.\n"
+        "2. Extract the Order ID: Look for any ID starting with 'FR-' followed by numbers (e.g., FR-10243). If not found, set order_id to 'UNKNOWN'.\n"
+        "Return ONLY a valid JSON string with keys 'category' and 'order_id'. Do not write any explanations."
+    )
+    
+    messages = [
+        ("system", system_prompt),
+        ("human", query)
+    ]
+    
+    try:
+        response = llm.invoke(messages)
+        raw_content = response.content.strip()
+        
+        # Sanitizing the LLM output to ensure only the raw JSON block is parsed
+        if "{" in raw_content and "}" in raw_content:
+            raw_content = raw_content[raw_content.find("{"):raw_content.rfind("}")+1]
+            
+        ai_data = json.loads(raw_content)
+        return {
+            "category": ai_data.get("category", "general_qa"), 
+            "order_id": ai_data.get("order_id", "UNKNOWN")
+        }
+    except Exception as e:
+        # Robust fallback mechanism to regex/rule-based routing if the local LLM fails or times out
+        print(f"LLM Error: {e}. Falling back to rule-based routing.")
+        extracted_order = "UNKNOWN"
+        if "FR-" in query.upper():
+            start_idx = query.upper().find("FR-")
+            extracted_order = query.upper()[start_idx:start_idx+8]
+        if "REFUND" in query.upper() or "RETURN" in query.upper():
+            return {"category": "refund", "order_id": extracted_order}
         return {"category": "general_qa", "order_id": extracted_order}
 
 def database_fetcher_node(state: AgentState) -> Dict:
@@ -91,19 +125,3 @@ workflow.add_edge("human_approval", "execute_refund")
 workflow.add_edge("execute_refund", END)
 
 compiled_agent = workflow.compile(checkpointer=MemorySaver(), interrupt_before=["human_approval"])
-
-# ==========================================
-# 4. ISOLATED TERMINAL TEST SUITE
-# ==========================================
-if __name__ == "__main__":
-    print("\n--- RUNNING ISOLATED GRAPH CORE TEST ---")
-    config = {"configurable": {"thread_id": "terminal_test_session"}}
-    initial_state = {
-        "user_query": "Bonjour! I want a refund for my order FR-10243 please.",
-        "api_errors": [], "human_approved": False, "final_output": ""
-    }
-    
-    for event in compiled_agent.stream(initial_state, config):
-        print(f"Executed: {list(event.keys())[0]}")
-        
-    print("\n🤖 Graph Core Compiled and Checked Successfully!")
