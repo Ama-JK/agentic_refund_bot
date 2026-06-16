@@ -1,4 +1,4 @@
-# 🇫🇷 Enterprise Refund Automation Engine (Built with LangGraph & Streamlit)
+# Enterprise Refund Automation Engine (Built with LangGraph & Streamlit)
 
 An advanced Agentic AI customer support system demonstrating a multi-agent state graph built with **LangGraph** featuring local mock database fetching, deterministic compliance validation, and a bulletproof **Human-in-the-Loop** approval checkpoint mechanism.
 
