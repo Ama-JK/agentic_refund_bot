@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from typing import Dict, TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -17,7 +18,7 @@ class AgentState(TypedDict):
     final_output: str
 
 # ==========================================
-# 2. DEFINE ARCHITECTURAL NODES
+# 2. DEFINE ARCHITECTURAL NODES (WITH REAL SQL DATABASE!)
 # ==========================================
 
 # NODE 1: The Intent Router Agent
@@ -28,7 +29,7 @@ def router_node(state: AgentState) -> Dict:
     system_prompt = (
         "You are an expert support router. Analyze the user's query and extract details.\n"
         "1. Identify the category: If they want a refund, return, or cancel an order, set category to 'refund'.\n"
-        "   If they ask a general question, store hours, locations, or product details, set category to 'general_qa'.\n"
+        "   If they ask a general question, store hours, locations, shipping, or contact details, set category to 'general_qa'.\n"
         "2. Extract the Order ID: Look for any ID starting with 'FR-' followed by numbers (e.g., FR-10243). If not found, set order_id to 'UNKNOWN'.\n"
         "Return ONLY a valid JSON string with keys 'category' and 'order_id'. Do not write any explanations."
     )
@@ -51,38 +52,77 @@ def router_node(state: AgentState) -> Dict:
             return {"category": "refund", "order_id": query.upper()[query.upper().find("FR-"):query.upper().find("FR-")+8]}
         return {"category": "general_qa", "order_id": "UNKNOWN"}
 
-# ✨ NEW NODE: The General QA Specialist Agent!
+# ✨ UPDATED NODE: QA Agent fetching Dynamic Knowledge Base from SQL!
 def general_qa_agent_node(state: AgentState) -> Dict:
     query = state["user_query"]
-    # We can give a slightly higher temperature for creative/helpful support answers
-    llm = ChatOllama(model="llama3", temperature=0.3)
+    llm = ChatOllama(model="llama3", temperature=0)
     
-    system_prompt = (
-        "You are a helpful customer service agent for a premium retail store called 'French Retail'.\n"
-        "Answer the customer's general question politely, professionally, and concisely.\n"
-        "If they ask for store hours: We are open Monday to Saturday from 9 AM to 8 PM.\n"
-        "If they ask for locations: Our main flagship store is located in Paris, France.\n"
-        "Keep the response under 3 sentences."
+    # Ask LLM to pick the right database keyword based on user query
+    keyword_prompt = (
+        "Analyze the user query and pick exactly ONE keyword that matches their intent from this list: "
+        "['hours', 'location', 'shipping', 'contact', 'details']. If none match, return 'UNKNOWN'.\n"
+        "Return ONLY the single word. No punctuation, no explanation."
     )
     
-    messages = [("system", system_prompt), ("human", query)]
-    response = llm.invoke(messages)
-    
-    # Store the LLM's direct answer into final_output
+    try:
+        db_keyword = llm.invoke([("system", keyword_prompt), ("human", query)]).content.strip().lower()
+        
+        # Connect to the real SQLite DB and fetch the actual policy text
+        conn = sqlite3.connect("french_retail.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT response_text FROM faq_store WHERE keyword = ?", (db_keyword,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            # Found inside the real Database!
+            return {"final_output": f"[Fetched from Secure DB] {row[0]}"}
+    except Exception as db_err:
+        print(f"Database QA Error: {db_err}")
+        
+    # Fallback to LLM general knowledge if not found in database
+    system_prompt = (
+        "You are a polite retail support agent for 'French Retail'.\n"
+        "If you don't know the specific answer based on the store, just say: "
+        "'Thank you for contacting French Retail. For store details, please specify if you need our location, hours, or shipping policies.'\n"
+        "Do not invent random shop names like Blooming Delights or fake US addresses."
+    )
+    response = llm.invoke([("system", system_prompt), ("human", query)])
     return {"final_output": response.content.strip()}
 
-# NODE 3: The Data Retrieval Agent
+# 🗄️ UPDATED NODE: Data Retrieval Agent fetching from real SQL 'orders' table!
 def database_fetcher_node(state: AgentState) -> Dict:
-    if state["order_id"] == "UNKNOWN":
+    order_id = state["order_id"]
+    if order_id == "UNKNOWN":
         return {"api_response": {"status": "error", "message": "No valid order ID provided."}}
+        
     try:
-        with open("database.json", "r") as f:
-            db = json.load(f)
-        if state["order_id"] in db:
-            return {"api_response": {"status": "success", "data": db[state["order_id"]]}}
-        return {"api_response": {"status": "error", "message": "Order ID not found in database."}}
+        # Connecting to the real SQLite DB file
+        conn = sqlite3.connect("french_retail.db")
+        cursor = conn.cursor()
+        
+        # SQL Query Injection Guard via parameterized query
+        cursor.execute("SELECT customer_name, amount, days_passed FROM orders WHERE order_id = ?", (order_id,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            # Structuring the database row into our AgentState schema format
+            return {
+                "api_response": {
+                    "status": "success",
+                    "data": {
+                        "customer": row[0],
+                        "amount": row[1],
+                        "days_passed": row[2]
+                    }
+                }
+            }
+        else:
+            return {"api_response": {"status": "error", "message": f"Order ID {order_id} not found in SQL database."}}
+            
     except Exception as e:
-        return {"api_response": {"status": "error", "message": str(e)}}
+        return {"api_response": {"status": "error", "message": f"SQL Database Error: {str(e)}"}}
 
 # NODE 4: The Compliance Agent
 def policy_validator_node(state: AgentState) -> Dict:
@@ -111,31 +151,20 @@ def execute_refund_node(state: AgentState) -> Dict:
     return {"final_output": f"Succès! Refund of €{amount} approved and processed for {customer_name}."}
 
 # ==========================================
-# 3. GRAPH COMPILATION PIPELINE (The Multi-Agent Map)
+# 3. GRAPH COMPILATION PIPELINE
 # ==========================================
 workflow = StateGraph(AgentState)
 
-# Register all nodes including our new QA Agent
 workflow.add_node("router", router_node)
-workflow.add_node("general_qa_agent", general_qa_agent_node) # 👈 Added
+workflow.add_node("general_qa_agent", general_qa_agent_node)
 workflow.add_node("database_fetcher", database_fetcher_node)
 workflow.add_node("policy_validator", policy_validator_node)
 workflow.add_node("human_approval", human_approval_placeholder_node)
 workflow.add_node("execute_refund", execute_refund_node)
 
-# Graph Routing Logic
 workflow.add_edge(START, "router")
-
-# 🔀 CONDITIONAL EDGE: Router splits traffic based on LLM decision!
-workflow.add_conditional_edges(
-    "router", 
-    lambda state: "database_fetcher" if state["category"] == "refund" else "general_qa_agent"
-)
-
-# QA Path directly goes to the end after answering
-workflow.add_edge("general_qa_agent", END) # 👈 Added
-
-# Refund Path follows the strict policy and human verification
+workflow.add_conditional_edges("router", lambda state: "database_fetcher" if state["category"] == "refund" else "general_qa_agent")
+workflow.add_edge("general_qa_agent", END)
 workflow.add_edge("database_fetcher", "policy_validator")
 
 def route_after_policy(state: AgentState):

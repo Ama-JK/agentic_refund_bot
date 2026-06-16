@@ -1,4 +1,0 @@
-{
-  "FR-10243": {"customer": "Anand", "amount": 89.99, "status": "delivered", "days_passed": 12},
-  "FR-99999": {"customer": "Marie", "amount": 150.00, "status": "delivered", "days_passed": 45}
-}
