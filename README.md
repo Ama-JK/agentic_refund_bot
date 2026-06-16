@@ -77,7 +77,7 @@ The automated verification engine checks 3 baseline production vectors using iso
 
 *   **`test_general_qa_shipping_path`**: Verifies dynamic SQL fetching against string token anchors (`[Fetched from Secure DB]`).
 *   **`test_refund_rejected_path`**: Tests logic constraints against database mock profiles beyond the 30-day transactional boundary.
-*   **`test_router_fallback_unknown_id`**: Asserts clean pipeline stabilization and graceful error messaging during unindexed query inquiries.
+*   **`test_router_fallback_unknown_id`**: Asserts clean pipeline stabilization and graceful error messaging during unindexed query inquiries
 
 ```text
 ...
